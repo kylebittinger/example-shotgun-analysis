@@ -1,0 +1,726 @@
+---
+title: "Data analysis"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+
+```{r message=FALSE}
+library(tidyverse)
+library(vegan)
+library(pheatbuilder)
+library(ggbeeswarm)
+library(broom)
+library(lmerTest)
+library(broom.mixed)
+library(usedist)
+library(adonisplus)
+library(mirix)
+```
+
+## Functions
+
+```{r}
+taxonomic_ranks <- c(
+  "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+split_assignments <- function (assignments, ranks=taxonomic_ranks, split="; ",
+                               remove = "^[kpcofgs]__") {
+  n <- length(ranks)
+  res <- stringr::str_split_fixed(assignments, pattern = split, n)
+  colnames(res) <- ranks
+  res <- tibble::as_tibble(res)
+
+  if (!is.null(remove)) {
+    res <- dplyr::mutate(res, dplyr::across(ranks, stringr::str_remove, remove))
+  }
+
+  dplyr::mutate(res, dplyr::across(ranks, dplyr::na_if, ""))
+}
+
+simplify_assignments <- function (assignments_df, rank1="Phylum",
+                                  rank2="Genus") {
+  if (is.character(rank1)) {
+    rank1 <- match(rank1, colnames(assignments_df))
+  }
+  if (is.character(rank2)) {
+    rank2 <- match(rank2, colnames(assignments_df))
+  }
+  apply(assignments_df, 1, function (x) {
+    x <- na.omit(as.character(x))
+    n <- length(x)
+    if (n == 1)     return(x)
+    if (n < rank1)  return(paste(x, collapse=" "))
+    if (n == rank1) return(x[rank1])
+    if (n < rank2)  return(paste(x[rank1], "-", x[length(x)]))
+    return(paste(x[rank1], "-", x[rank2]))
+  })
+}
+```
+
+```{r}
+filter_taxa_shotgun <- function (taxa_df) {
+  taxa_df %>%
+    filter(Kingdom %in% "Bacteria")
+}
+
+filter_taxa_16S <- function (taxa_df) {
+  taxa_df %>%
+    filter(!is.na(Phylum)) %>%
+    filter(!(Class %in% "Chloroplast")) %>%
+    filter(!(Family %in% "mitochondria"))
+}
+```
+
+
+```{r}
+save_figure <- function (fbase, width, height, p = last_plot()) {
+  ggsave(
+    paste0(fbase, ".pdf"), plot = p, width = width, height = height,
+    useDingbats = FALSE)
+  ggsave(
+    paste0(fbase, ".png"), plot = p, width = width, height = height,
+    dpi = 300)
+}
+```
+
+```{r}
+p_stars <- function (x, ns = "") {
+  cut(
+    x, breaks = c(-0.001, 0.001, 0.01, 0.05, 1.01),
+    labels = c("***", "**", "*", ns))
+}
+```
+
+
+## Colors
+
+```{r}
+resistant_colors <- c(resistant = "#ff8585", susceptible = "#999999")
+```
+
+```{r}
+group_colors_placebo <- c(Placebo = "#1F77B4", Vancomycin = "#FF7F0E")
+group_colors_control <- c(Control = "#1F77B4", Amoxicillin = "#FF7F0E")
+week_colors <- c(
+  "Week 0" = "#A6BDDB", "Week 4" = "#74A9CF", "Week 8" = "#0570B0",
+  "Week 12" = "#045A8D")
+day_colors <- c(
+  "Day 0" = "#A6BDDB", "Day 1" = "#74A9CF", "Day 3" = "#0570B0",
+  "Day 7" = "#045A8D")
+day_colors_long <- c(
+  "Day 0" = "#A6BDDB", "Day 7" = "#74A9CF", "Day 14" = "#3690C0",
+  "Day 21" = "#0570B0", "Day 28" = "#045A8D")
+```
+
+```{r}
+taxa_colors <- c(
+  "Actinobacteria - Bifidobacterium" = "#d7b3f5",
+  "Bacteroidetes - Bacteroides" = "#045A8D",
+  "Bacteroidetes - Bacteroides caccae" = "#A6BDDB",
+  "Bacteroidetes - Bacteroides dorei" = "#74A9CF",
+  "Bacteroidetes - Bacteroides ovatus" = "#0570B0",
+  "Bacteroidetes - Bacteroides thetaiotaomicron" = "#1ac3ed",
+  "Bacteroidetes - Bacteroides vulgatus" = "#b5e0eb",
+  "Firmicutes - Clostridiales" = "#f5e173",
+  "Firmicutes - Lachnospiraceae" = "#f2bb24",
+  "Firmicutes - Ruminococcaceae" = "#c5fa8c",
+  "Firmicutes - Anaerostipes [Eubacterium] rectale" = "#a68428",
+  "Firmicutes - Blautia" = "#ffc421",
+  "Firmicutes - Enterococcus" = "#8e1496",
+  "Firmicutes - Faecalibacterium prausnitzii" = "#d1cc7d",
+  "Firmicutes - Flavonifractor plautii" = "#a0c497",
+  "Firmicutes - Lachnoclostridium sp. YL32" = "#92f098",
+  "Firmicutes - Lactobacillus" = "#f5a573",
+  "Firmicutes - Streptococcus" = "#f59396",
+  "Proteobacteria - Enterobacteriaceae" = "#bf0a8f",
+  "Proteobacteria - Pseudomonas tolaasii" = "#f593db",
+  "Verrucomicrobia - Akkermansia muciniphila" = "#1cad34",
+  "Other" = "#BBBBBB")
+```
+
+# Basolo (vancomycin, shotgun)
+
+## Import
+
+```{r}
+s_basolo <- read_tsv("basolo_samples.tsv")
+taxa_basolo <- read_tsv("basolo_taxa.tsv")
+cts_basolo <- read_tsv("basolo_cts.tsv")
+```
+
+## Alpha diversity
+
+```{r}
+adiv_basolo <- cts_basolo %>%
+  group_by(sample_id) %>%
+  summarize(
+    total_reads = sum(reads),
+    richness = vegan::rarefy(reads, 1000),
+    shannon = vegan::diversity(reads))
+```
+
+```{r}
+s_basolo %>%
+  left_join(adiv_basolo, by = "sample_id") %>%
+  ggplot(aes(x = study_group, y = shannon, color = study_group)) +
+  geom_quasirandom() +
+  scale_color_manual(values = group_colors_placebo, guide = "none") +
+  labs(y = "Shannon diversity", x = "") +
+  theme_bw()
+```
+
+```{r}
+s_basolo %>%
+  left_join(adiv_basolo, by = "sample_id") %>%
+  summarise(tidy(lm(shannon ~ study_group, data = .)))
+```
+
+## Taxonomic abundance
+
+```{r}
+diffabund_basolo <- cts_basolo %>%
+  group_by(sample_id) %>%
+  mutate(prop = reads / sum(reads)) %>%
+  ungroup() %>%
+  group_by(taxon_id) %>%
+  filter(mean(prop) > 0.005) %>%
+  ungroup() %>%
+  left_join(taxa_basolo, by = "taxon_id") %>%
+  left_join(s_basolo, by = "sample_id") %>%
+  mutate(log_prop = log10(prop + 1e-6)) %>%
+  group_by(assignment) %>%
+  summarise(tidy(lm(log_prop ~ study_group, data = .))) %>%
+  ungroup() %>%
+  filter(term %in% "study_groupVancomycin") %>%
+  mutate(fdr = p.adjust(p.value, method = "fdr")) %>%
+  arrange(p.value) %>%
+  select(assignment, estimate, fdr)
+```
+
+```{r}
+cts_basolo %>%
+  group_by(sample_id) %>%
+  mutate(prop = reads / sum(reads)) %>%
+  ungroup() %>%
+  group_by(taxon_id) %>%
+  filter(mean(prop) > 0.005) %>%
+  ungroup() %>%
+  left_join(taxa_basolo, by = "taxon_id") %>%
+  left_join(s_basolo, by = "sample_id") %>%
+  ggplot(aes(x = study_group, y = prop, color = study_group)) +
+  geom_quasirandom() +
+  facet_wrap(~ assignment) +
+  scale_y_log10() +
+  scale_color_manual(values = group_colors_placebo, guide = "none") +
+  labs(y = "Relative abundance", x = "") +
+  theme_bw()
+```
+
+
+## Dispersion
+
+```{r}
+dispersion_basolo <- bc_basolo %>%
+  dist_subset(s_basolo$sample_id) %>%
+  dist_to_centroids(s_basolo$study_group) %>%
+  rename(
+    sample_id = Item,
+    reference_group = CentroidGroup,
+    dispersion = CentroidDistance) %>%
+  left_join(s_basolo, by = "sample_id") %>%
+  filter(study_group == reference_group) %>%
+  select(sample_id, reference_group, dispersion)
+```
+
+```{r}
+dispersion_basolo %>%
+  left_join(s_basolo, by = "sample_id") %>%
+  ggplot(aes(x = study_group, y = dispersion, color = study_group)) +
+  geom_quasirandom() +
+  scale_color_manual(values = group_colors_placebo, guide = "none") +
+  labs(x = "", y = "Dispersion\n(distance to group centroid)") +
+  theme_bw()
+```
+
+```{r}
+dispersion_basolo %>%
+  left_join(s_basolo, by = "sample_id") %>%
+  lm(dispersion ~ study_group, data = .) %>%
+  summary()
+```
+
+```{r}
+s_basolo %>%
+  left_join(dispersion_basolo, by = "sample_id") %>%
+  left_join(idxdf_basolo, by = "sample_id") %>%
+  ggplot(aes(y = dispersion, x = vanco_idx, color = study_group)) +
+  geom_point() +
+  facet_wrap(~ study_group) +
+  scale_color_manual(values = group_colors_placebo, guide = "none") +
+  labs(
+    y = "Dispersion\n(distance to group centroid)",
+    x = "MiRIx - Vancomycin") +
+  theme_bw()
+```
+
+```{r}
+s_basolo %>%
+  left_join(dispersion_basolo, by = "sample_id") %>%
+  left_join(idxdf_basolo, by = "sample_id") %>%
+  lm(vanco_idx ~ dispersion, data = .) %>%
+  summary()
+```
+
+## Rebalance
+
+```{r}
+rebalance_at_basolo <- function (x) {
+  cts_ref <- cts_basolo %>%
+    left_join(s_basolo, by = "sample_id") %>%
+    filter(study_group %in% "Placebo") %>%
+    mutate(sample_id = paste0(sample_id, "__ref")) %>%
+    select(sample_id, taxon_id, prop)
+  cts_pred <- cts_basolo %>%
+    left_join(suscept_basolo, by = "taxon_id") %>%
+    group_by(sample_id) %>%
+    mutate(prop = predict_abundance(x, prop, vanco_suscept)) %>%
+    ungroup() %>%
+    select(sample_id, taxon_id, prop)
+  adiv_pred <- cts_pred %>%
+    group_by(sample_id) %>%
+    summarise(shannon = diversity(prop))
+  cts_matrix <- bind_rows(cts_ref, cts_pred) %>%
+    pivot_to_matrix(sample_id, taxon_id, prop)
+  bc <- vegdist(cts_matrix)
+  g <- if_else(str_ends(rownames(cts_matrix), "__ref"), "ref", "pred")
+  dysbiosis_pred <- dist_to_centroids(bc, g) %>%
+    rename(sample_id = Item, dysbiosis = CentroidDistance) %>%
+    filter(CentroidGroup %in% "ref") %>%
+    filter(!str_ends(sample_id, "__ref")) %>%
+    select(sample_id, dysbiosis)
+  adiv_pred %>%
+    left_join(dysbiosis_pred, by = "sample_id")
+}
+```
+
+```{r}
+pred_basolo <- tibble(vanco_idx = seq(-1.5, 1.8, 0.1)) %>%
+  rowwise() %>%
+  mutate(predicted_data = list(rebalance_at_basolo(vanco_idx))) %>%
+  unnest(predicted_data)
+```
+
+```{r}
+obs_basolo <- s_basolo %>%
+  left_join(adiv_basolo, by = "sample_id") %>%
+  left_join(idxdf_basolo, by = "sample_id") %>%
+  left_join(dysbiosis_basolo, by = "sample_id")
+```
+
+```{r}
+pred_basolo %>%
+  left_join(s_basolo, by = "sample_id") %>%
+  ggplot(aes(x = vanco_idx, y = shannon, color = study_group)) +
+  geom_point(data = obs_basolo) +
+  geom_line(aes(x = vanco_idx, group = sample_id)) +
+  facet_grid(~ study_group) +
+  scale_color_manual(values = group_colors_placebo, guide = "none") +
+  theme_bw()
+```
+
+```{r}
+pred_basolo %>%
+  left_join(s_basolo, by = "sample_id") %>%
+  ggplot(aes(x = vanco_idx, y = dysbiosis, color = study_group)) +
+  geom_point(data = obs_basolo) +
+  geom_line(aes(x = vanco_idx, group = sample_id)) +
+  facet_grid(~ study_group) +
+  scale_color_manual(values = group_colors_placebo, guide = "none") +
+  theme_bw()
+```
+
+# Willmann (ciprofloxacin, shotgun)
+
+## Import
+
+```{r message=FALSE}
+time_points_willmann <- read_csv("paperdata/willmann/time_points.csv")
+s_willmann <- read_tsv("paperdata/willmann/preprocess_summary.tsv") %>%
+  rename(sample_id = Samples) %>%
+  separate(
+    sample_id, into = c("subject_id", "time_point"),
+    sep = "_", remove = FALSE) %>%
+  left_join(time_points_willmann, by = "time_point") %>%
+  mutate(subject_id = paste("Subj", subject_id)) %>%
+  select(sample_id, study_day, subject_id, everything()) %>%
+  arrange(study_day, subject_id)
+write_tsv(s_willmann, "willmann_samples.tsv")
+```
+
+
+```{r message=FALSE}
+cts_willmann <- read_tsv("paperdata/willmann/all_samples.tsv", skip = 1) %>%
+  rename(taxon_id = `#OTU ID`)
+taxa_willmann <- cts_willmann %>%
+  select(taxon_id, lineage = `Consensus Lineage`) %>%
+  summarise(bind_cols(., split_assignments(lineage))) %>%
+  mutate(Species = if_else(
+    !is.na(Species), paste(Genus, Species), NA_character_)) %>%
+  mutate(assignment = simplify_assignments(
+    select(., Kingdom:Species), rank2 = "Species")) %>%
+  filter_taxa_shotgun()
+cts_willmann <- cts_willmann %>%
+  select(-`Consensus Lineage`) %>%
+  pivot_longer(
+    cols = -taxon_id, names_to = "sample_id", values_to = "reads") %>%
+  mutate(sample_id = str_remove(sample_id, "-taxa$")) %>%
+  filter(taxon_id %in% taxa_willmann$taxon_id) %>%
+  group_by(sample_id) %>%
+  mutate(prop = reads / sum(reads)) %>%
+  ungroup() %>%
+  select(sample_id, taxon_id, reads, prop)
+write_tsv(taxa_willmann, "willmann_taxa.tsv")
+write_tsv(cts_willmann, "willmann_cts.tsv")
+```
+
+```{r warning=FALSE}
+adiv_willmann <- cts_willmann %>%
+  group_by(sample_id) %>%
+  summarize(
+    total_reads = sum(reads),
+    richness = vegan::rarefy(reads, 1000),
+    shannon = vegan::diversity(prop))
+```
+
+```{r}
+card_willmann <- read_tsv(
+  "paperdata/willmann/card_assignments.tsv", show_col_types = FALSE) %>%
+  rename(
+    accession = geneID, strain = taxon, reads = count, sample_id = SampleID) %>%
+  pivot_wider(
+    names_from = sample_id, values_from = reads,
+    values_fill = list(reads = 0)) %>%
+  pivot_longer(
+    cols = -c(accession, strain), names_to = "sample_id", values_to = "reads")
+write_tsv(card_willmann, "willmann_card.tsv")
+```
+
+```{r}
+card_info <- read_tsv(
+  "paperdata/willmann/aro_categories_index.tsv", show_col_types = FALSE) %>%
+  rename(
+    accession = `Protein Accession`, dna_accession = `DNA Accession`,
+    gene_family = `AMR Gene Family`, drug_class = `Drug Class`,
+    resistance_mechanism = `Resistance Mechanism`)
+write_tsv(card_info, "card_info.tsv")
+```
+
+```{r}
+# grep '^>' paperdata/willmann/protein_fasta_protein_homolog_model.fasta|perl -lpe's/^>gb\|//; s/\|/\t/g; s/ \[/\t/; s/\]\s+$//' > paperdata/willmann/card_header_info.tsv
+card_header_info <- read_tsv(
+  "paperdata/willmann/card_header_info.tsv",
+  col_names = c("accession", "aro", "gene_name", "species"),
+  show_col_types = FALSE)
+write_tsv(card_header_info, "card_header_info.tsv")
+```
+
+```{r}
+s_willmann %>%
+  count(subject_id)
+```
+
+## Taxa overview
+
+```{r}
+props_hmap_willmann <- cts_willmann %>%
+  left_join(taxa_willmann, by = "taxon_id") %>%
+  group_by(sample_id, assignment) %>%
+  summarise(prop = sum(prop), .groups = "drop") %>%
+  group_by(assignment) %>%
+  filter(mean(prop) > 0.005) %>%
+  pivot_wider(
+    id_cols = assignment, names_from = sample_id,
+    values_from = prop, values_fill = list(prop = 0)) %>%
+  select(assignment, all_of(s_willmann$sample_id))
+```
+
+```{r}
+props_hmap_willmann %>%
+  pheat() %>%
+  pheat_display_cols(gaps = factor_gaps(s_willmann$study_day)) %>%
+  pheat_save("figures/hmap_willmann.pdf")
+```
+
+```{r}
+diffabund_willmann <- cts_willmann %>%
+  left_join(taxa_willmann, by = "taxon_id") %>%
+  group_by(sample_id, assignment) %>%
+  summarise(prop = sum(prop), .groups = "drop") %>%
+  group_by(assignment) %>%
+  filter(mean(prop) > 0.005) %>%
+  ungroup() %>%
+  left_join(s_willmann, by = "sample_id") %>%
+  mutate(log_prop = log10(prop + 1e-6)) %>%
+  nest_by(assignment) %>%
+  summarise(
+    tidy(lmer(log_prop ~ study_day + (1|subject_id), data = data)),
+    .groups = "drop") %>%
+  filter(effect %in% "fixed", str_starts(term, "study_day")) %>%
+  mutate(term = str_remove(term, "study_day")) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method = "fdr")) %>%
+  ungroup() %>%
+  arrange(term, p.value) %>%
+  filter(fdr < 0.05) %>%
+  select(assignment, term, estimate, fdr)
+write_csv(diffabund_willmann, "tables/supplementary_table_3.csv")
+```
+
+## Ciprofloxacin index
+
+```{r warning=FALSE}
+idxdf_willmann <- cts_willmann %>%
+  left_join(taxa_willmann, by = "taxon_id") %>%
+  group_by(sample_id, lineage) %>%
+  summarise(prop = sum(prop), .groups = "drop") %>%
+  group_by(sample_id) %>%
+  summarise(cipro_idx = mirix_ciprofloxacin(prop, lineage))
+```
+
+```{r}
+idxdf_willmann %>%
+  left_join(s_willmann, by = "sample_id") %>%
+  mutate(study_day = fct_rev(study_day)) %>%
+  ggplot(aes(x = cipro_idx, y = study_day, color = study_day)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_quasirandom(groupOnX = FALSE) +
+  scale_color_manual(values = day_colors, guide = "none") +
+  labs(x = "Ciprofloxacin-MiRIx", y = "") +
+  theme_classic() +
+  theme(plot.margin = margin(l=34, t=5, r=5, b=5))
+save_figure("figures/mirix_fig2c_left", width = 3.8, height = 2.5)
+```
+
+```{r}
+idxdf_willmann %>%
+  left_join(s_willmann, by = "sample_id") %>%
+  lmer(cipro_idx ~ study_day + (1|subject_id), data =.) %>%
+  summary()
+```
+
+## Diversity
+
+```{r}
+s_willmann %>%
+  left_join(adiv_willmann, by = "sample_id") %>%
+  ggplot(aes(x = study_day, y = shannon, color = study_day)) +
+  geom_quasirandom() +
+  scale_color_manual(values = day_colors, guide = "none") +
+  labs(y = "Shannon diversity", x = "") +
+  theme_bw()
+```
+
+```{r}
+s_willmann %>%
+  left_join(adiv_willmann, by = "sample_id") %>%
+  lmer(shannon ~ study_day + (1|subject_id), data = .) %>%
+  summary()
+```
+
+```{r}
+s_willmann %>%
+  left_join(adiv_willmann, by = "sample_id") %>%
+  left_join(idxdf_willmann, by = "sample_id") %>%
+  ggplot(aes(x = cipro_idx, y = shannon, color = study_day)) +
+  geom_point() +
+  facet_wrap(~ study_day) +
+  scale_color_manual(values = day_colors) +
+  theme_bw()
+```
+
+```{r}
+s_willmann %>%
+  left_join(adiv_willmann, by = "sample_id") %>%
+  left_join(idxdf_willmann, by = "sample_id") %>%
+  lmer(shannon ~ cipro_idx + (1|subject_id), data = .) %>%
+  summary()
+```
+
+## Dysbiosis
+
+```{r}
+bc_willmann <- cts_willmann %>%
+  usedist::pivot_to_matrix(sample_id, taxon_id, prop) %>%
+  vegdist()
+```
+
+```{r}
+s_willmann %>%
+  pcoaplus(bc_willmann, sample_id_var = sample_id) %>%
+  plot(color = study_day) +
+  scale_color_manual(values = day_colors) +
+  facet_wrap(~ study_day) +
+  theme_bw()
+```
+
+```{r}
+dysbiosis_willmann <- bc_willmann %>%
+  dist_subset(s_willmann$sample_id) %>%
+  dist_to_centroids(s_willmann$study_day) %>%
+  rename(
+    sample_id = Item,
+    reference_group = CentroidGroup,
+    dysbiosis = CentroidDistance) %>%
+  filter(reference_group %in% "Day 0")
+```
+
+```{r}
+dysbiosis_willmann %>%
+  left_join(s_willmann, by = "sample_id") %>%
+  ggplot(aes(y = dysbiosis, x = study_day, color = study_day)) +
+  geom_quasirandom() +
+  scale_color_manual(values = day_colors, guide = "none") +
+  labs(y = "Dysbiosis\n(distance to Week 0 centroid)", x = "") +
+  theme_bw()
+```
+
+```{r}
+dysbiosis_willmann %>%
+  left_join(s_willmann, by = "sample_id") %>%
+  lmer(dysbiosis ~ study_day + (1|subject_id), data = .) %>%
+  summary()
+```
+
+```{r}
+s_willmann %>%
+  left_join(dysbiosis_willmann, by = "sample_id") %>%
+  left_join(idxdf_willmann, by = "sample_id") %>%
+  ggplot(aes(y = dysbiosis, x = cipro_idx, color = study_day)) +
+  geom_point() +
+  facet_wrap(~ study_day) +
+  scale_color_manual(values = day_colors, guide = "none") +
+  labs(y = "Dysbiosis\n(distance to Day 0 centroid)", x = "MiRIx - Metronidazole") +
+  theme_bw()
+```
+
+```{r}
+s_willmann %>%
+  left_join(dysbiosis_willmann, by = "sample_id") %>%
+  left_join(idxdf_willmann, by = "sample_id") %>%
+  lmer(cipro_idx ~ study_day * dysbiosis + (1|subject_id), data = .) %>%
+  summary()
+```
+
+## Dispersion
+
+```{r}
+dispersion_willmann <- bc_willmann %>%
+  dist_subset(s_willmann$sample_id) %>%
+  dist_to_centroids(s_willmann$study_day) %>%
+  rename(
+    sample_id = Item,
+    reference_group = CentroidGroup,
+    dispersion = CentroidDistance) %>%
+  left_join(s_willmann, by = "sample_id") %>%
+  filter(study_day == reference_group) %>%
+  select(sample_id, reference_group, dispersion)
+```
+
+```{r}
+dispersion_willmann %>%
+  left_join(s_willmann, by = "sample_id") %>%
+  ggplot(aes(x = study_day, y = dispersion, color = study_day)) +
+  geom_quasirandom() +
+  scale_color_manual(values = day_colors, guide = "none") +
+  theme_bw()
+```
+
+```{r}
+dispersion_willmann %>%
+  left_join(s_willmann, by = "sample_id") %>%
+  lmer(dispersion ~ study_day + (1|subject_id), data = .) %>%
+  summary()
+```
+
+```{r}
+s_willmann %>%
+  left_join(dispersion_willmann, by = "sample_id") %>%
+  left_join(idxdf_willmann, by = "sample_id") %>%
+  ggplot(aes(x = dispersion, y = cipro_idx, color = study_day)) +
+  geom_point() +
+  facet_wrap(~ study_day) +
+  scale_color_manual(values = day_colors, guide = "none") +
+  labs(x = "Dispersion\n(distance to group centroid)", y = "MiRIx - Metronidazole") +
+  theme_bw()
+```
+
+## CARD genes
+
+```{r}
+card_props_willmann <- adiv_willmann %>%
+  left_join(card_willmann, by = "sample_id") %>%
+  mutate(prop = reads / total_reads) %>%
+  left_join(card_info, by = "accession") %>%
+  filter(str_detect(drug_class, "fluoroquinolone")) %>%
+  left_join(card_header_info, by = "accession") %>%
+  filter(!is.na(aro)) %>%
+  left_join(s_willmann, by = "sample_id") %>%
+  group_by(accession) %>%
+  filter(mean(prop) > 1e-5) %>%
+  ungroup() %>%
+  mutate(species = str_remove(species, "(?<=K-12).+")) %>%
+  mutate(species = str_remove(species, "(?<=enterica) subsp.+")) %>%
+  mutate(species = str_remove(species, "(?<=doylei).+")) %>%
+  mutate(species = str_remove(species, "subsp. aureus ")) %>%
+  mutate(species = str_remove(species, "(?<=damselae).+"))
+```
+
+```{r}
+card_props_willmann %>%
+  group_by(accession) %>%
+  summarise(mean_prop = mean(prop), .groups = "drop") %>%
+  arrange(desc(mean_prop))
+```
+
+```{r}
+card_tests_willman <- card_props_willmann %>%
+  mutate(log_prop = log10(prop + 1e-6)) %>%
+  group_by(aro, gene_name, resistance_mechanism, species) %>%
+  summarize(
+    tidy(lmer(log_prop ~ study_day + (1|subject_id))),
+    .groups = "drop") %>%
+  filter(str_detect(term, "study_day")) %>%
+  mutate(term = str_remove(term, "study_day")) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value)) %>%
+  ungroup() %>%
+  rename(study_day = term) %>%
+  mutate(sig_label = p_stars(fdr))
+card_tests_willman %>%
+  filter(fdr < 0.05) %>%
+  select(aro, study_day, estimate, fdr)
+```
+
+```{r}
+card_props_willmann %>%
+  ggplot() +
+  ggbeeswarm::geom_quasirandom(
+    aes(x = study_day, color = study_day, y = prop)) +
+  geom_text(
+    aes(label = sig_label, x = study_day, y = 0.001), 
+    data = dplyr::filter(card_tests_willman, fdr < 0.05)) +
+  facet_wrap(~ resistance_mechanism + aro + gene_name + species) +
+  scale_y_log10() +
+  scale_color_manual(values = day_colors) +
+  labs(y = "Relative abundance", x = "") +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    legend.position = "none")
+save_figure("figures/mirix_figS1", width = 20, height = 20)
+```
+

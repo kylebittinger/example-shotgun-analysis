@@ -169,7 +169,8 @@ adiv_basolo %>%
 ```{r}
 adiv_basolo %>%
   left_join(s_basolo, by = "sample_id") %>%
-  summarise(tidy(lm(shannon ~ study_group, data = .)))
+  nest_by() %>%
+  summarise(tidy(lm(shannon ~ study_group, data = data)))
 ```
 
 ## Taxonomic abundance
@@ -224,6 +225,7 @@ cts_willmann <- read_tsv("willmann_cts.tsv")
 ```
 
 ```{r}
+card_willmann <- read_tsv("willmann_card.tsv")
 card_info <- read_tsv("card_info.tsv")
 card_header_info <- read_tsv("card_header_info.tsv")
 ```
@@ -240,8 +242,8 @@ adiv_willmann <- cts_willmann %>%
 ```
 
 ```{r}
-s_willmann %>%
-  left_join(adiv_willmann, by = "sample_id") %>%
+adiv_willmann %>%
+  left_join(s_willmann, by = "sample_id") %>%
   ggplot(aes(x = study_day, y = shannon, color = study_day)) +
   geom_quasirandom() +
   scale_color_manual(values = day_colors, guide = "none") +
@@ -250,22 +252,20 @@ s_willmann %>%
 ```
 
 ```{r}
-s_willmann %>%
-  left_join(adiv_willmann, by = "sample_id") %>%
-  lmer(shannon ~ study_day + (1|subject_id), data = .) %>%
-  summary()
+adiv_willmann %>%
+  left_join(s_willmann, by = "sample_id") %>%
+  nest_by() %>%
+  summarise(tidy(lmer(shannon ~ study_day + (1|subject_id), data = data)))
 ```
 
 ## Taxonomic abundance
 
 ```{r}
 diffabund_willmann <- cts_willmann %>%
-  left_join(taxa_willmann, by = "taxon_id") %>%
-  group_by(sample_id, assignment) %>%
-  summarise(prop = sum(prop), .groups = "drop") %>%
-  group_by(assignment) %>%
+  group_by(taxon_id) %>%
   filter(mean(prop) > 0.005) %>%
   ungroup() %>%
+  left_join(taxa_willmann, by = "taxon_id") %>%
   left_join(s_willmann, by = "sample_id") %>%
   mutate(log_prop = log10(prop + 1e-6)) %>%
   nest_by(assignment) %>%
@@ -273,17 +273,29 @@ diffabund_willmann <- cts_willmann %>%
     tidy(lmer(log_prop ~ study_day + (1|subject_id), data = data)),
     .groups = "drop") %>%
   filter(effect %in% "fixed", str_starts(term, "study_day")) %>%
-  mutate(term = str_remove(term, "study_day")) %>%
   group_by(term) %>%
   mutate(fdr = p.adjust(p.value, method = "fdr")) %>%
   ungroup() %>%
   arrange(term, p.value) %>%
   filter(fdr < 0.05) %>%
   select(assignment, term, estimate, fdr)
-write_csv(diffabund_willmann, "tables/supplementary_table_3.csv")
 ```
 
-
+```{r}
+cts_willmann %>%
+  group_by(taxon_id) %>%
+  filter(mean(prop) > 0.005) %>%
+  ungroup() %>%
+  left_join(taxa_willmann, by = "taxon_id") %>%
+  left_join(s_willmann, by = "sample_id") %>%
+  ggplot(aes(x = study_day, y = prop, color = study_day)) +
+  geom_quasirandom() +
+  facet_wrap(~ assignment) +
+  scale_y_log10() +
+  scale_color_manual(values = day_colors, guide = "none") +
+  labs(y = "Relative abundance", x = "") +
+  theme_bw()
+```
 
 ## CARD genes
 
@@ -309,7 +321,8 @@ card_props_willmann <- adiv_willmann %>%
 ```{r}
 card_props_willmann %>%
   group_by(accession) %>%
-  summarise(mean_prop = mean(prop), .groups = "drop") %>%
+  summarise(mean_prop = mean(prop)) %>%
+  ungroup() %>%
   arrange(desc(mean_prop))
 ```
 
@@ -317,9 +330,8 @@ card_props_willmann %>%
 card_tests_willman <- card_props_willmann %>%
   mutate(log_prop = log10(prop + 1e-6)) %>%
   group_by(aro, gene_name, resistance_mechanism, species) %>%
-  summarize(
-    tidy(lmer(log_prop ~ study_day + (1|subject_id))),
-    .groups = "drop") %>%
+  summarize(tidy(lmer(log_prop ~ study_day + (1|subject_id)))) %>%
+  ungroup() %>%
   filter(str_detect(term, "study_day")) %>%
   mutate(term = str_remove(term, "study_day")) %>%
   group_by(term) %>%
